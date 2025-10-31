@@ -1,0 +1,7 @@
+streamlit==1.24.0
+pandas==2.2.2
+streamlit
+pandas
+google-generativeai
+python-dotenv
+fpdf

@@ -1,0 +1,70 @@
+{
+  "sql": [
+    {
+      "question": "Which SQL clause is used to filter rows?",
+      "options": ["SELECT", "WHERE", "GROUP BY", "ORDER BY"],
+      "correct": 1
+    },
+    {
+      "question": "Which command adds a new row to a table?",
+      "options": ["INSERT INTO", "ADD ROW", "NEW ROW", "CREATE ROW"],
+      "correct": 0
+    },
+    {
+      "question": "Which keyword returns unique values?",
+      "options": ["UNIQUE", "DISTINCT", "SINGLE", "NONE"],
+      "correct": 1
+    }
+  ],
+  "python": [
+    {
+      "question": "Which keyword defines a function in Python?",
+      "options": ["func", "def", "function", "lambda"],
+      "correct": 1
+    },
+    {
+      "question": "Which data type is immutable?",
+      "options": ["list", "dict", "set", "tuple"],
+      "correct": 3
+    },
+    {
+      "question": "Pick a correct list comprehension:",
+      "options": ["[x for x in it]", "(x for x in it)", "{x for x in it}", "<x for x in it>"],
+      "correct": 0
+    }
+  ],
+  "data visualization": [
+    {
+      "question": "Which tool is commonly used for data visualization?",
+      "options": ["Tableau", "MySQL", "Flask", "Docker"],
+      "correct": 0
+    },
+    {
+      "question": "Which chart best shows a distribution?",
+      "options": ["Histogram", "Pie chart", "Line chart", "Table"],
+      "correct": 0
+    },
+    {
+      "question": "Which Python library is for plotting?",
+      "options": ["matplotlib", "scikit-learn", "pandas", "numpy"],
+      "correct": 0
+    }
+  ],
+  "statistics": [
+    {
+      "question": "Mean is a measure of:",
+      "options": ["Central tendency", "Spread", "Correlation", "Shape"],
+      "correct": 0
+    },
+    {
+      "question": "Standard deviation measures:",
+      "options": ["Spread", "Central tendency", "Skewness", "Kurtosis"],
+      "correct": 0
+    },
+    {
+      "question": "Which test compares means of two groups?",
+      "options": ["t-test", "Chi-square", "ANOVA", "KS-test"],
+      "correct": 0
+    }
+  ]
+}
