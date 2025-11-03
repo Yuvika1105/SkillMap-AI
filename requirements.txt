@@ -1,7 +1,10 @@
-streamlit==1.24.0
+streamlit==1.29.0
 pandas==2.2.2
-streamlit
-pandas
-google-generativeai
+google-generativeai==0.2.2
 python-dotenv
 fpdf
+python-docx
+pdfplumber
+PyPDF2
+pillow
+pytesseract

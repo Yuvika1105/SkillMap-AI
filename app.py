@@ -7,11 +7,19 @@ import os
 import re
 from datetime import datetime
 from dotenv import load_dotenv
+# for resume parsing
+import io
+import pdfplumber
+import docx
+from PIL import Image
+import pytesseract
+from PyPDF2 import PdfReader
 
 # ---------------- AI imports ----------------
 # Ensure google-generativeai is installed and .env has GOOGLE_API_KEY
 try:
     import google.generativeai as genai
+    from google import genai as genai_client
     AI_AVAILABLE = True
 except Exception:
     AI_AVAILABLE = False
@@ -33,6 +41,8 @@ if AI_AVAILABLE:
     API_KEY = os.getenv("GOOGLE_API_KEY")
     if API_KEY:
         genai.configure(api_key=API_KEY)
+        # Instantiate client using the simplified standard method
+        client = genai_client.Client(api_key=API_KEY) 
     else:
         AI_AVAILABLE = False
 
@@ -50,6 +60,7 @@ def normalize_text(t: str) -> str:
 def load_skills():
     if not os.path.exists(SKILLS_CSV):
         return []
+    # Reads skill names, one per line, from the CSV
     return [line.strip().lower() for line in open(SKILLS_CSV, encoding='utf-8') if line.strip()]
 
 def load_courses():
@@ -70,12 +81,102 @@ def extract_skills_from_text(text, skills):
             found.append(s)
     return sorted(set(found))
 
+# Resume Parsing functions (omitted for brevity, assume they are correct)
+# NOTE: PDF/DOCX support relies on external libraries/OS dependencies (pdfplumber, docx, pytesseract)
+# ... [Place the original `parse_resume` and `strip_pii` functions here] ...
+def parse_resume(uploaded_file):
+    """
+    Accepts a Streamlit UploadedFile and returns extracted plain text.
+    Supports: .txt, .pdf (text & scanned via OCR fallback), .docx
+    """
+    if uploaded_file is None:
+        return ""
+
+    fname = uploaded_file.name.lower()
+    data = uploaded_file.read()
+
+    # TXT
+    if fname.endswith(".txt"):
+        try:
+            return data.decode("utf-8", errors="ignore")
+        except:
+            return data.decode("latin-1", errors="ignore")
+
+    # DOCX
+    if fname.endswith(".docx"):
+        try:
+            doc = docx.Document(io.BytesIO(data))
+            texts = [p.text for p in doc.paragraphs]
+            return "\n".join(texts)
+        except Exception as e:
+            print("DOCX parse error:", e)
+            return ""
+
+    # PDF (text-first, then PyPDF2, then OCR fallback)
+    if fname.endswith(".pdf"):
+        # 1) pdfplumber (good for text PDFs)
+        try:
+            text_pages = []
+            with pdfplumber.open(io.BytesIO(data)) as pdf:
+                for page in pdf.pages:
+                    txt = page.extract_text()
+                    if txt:
+                        text_pages.append(txt)
+            all_text = "\n".join(text_pages).strip()
+            if all_text:
+                return all_text
+        except Exception as e:
+            print("pdfplumber error:", e)
+
+        # 2) PyPDF2 fallback
+        try:
+            reader = PdfReader(io.BytesIO(data))
+            pages_text = []
+            for p in reader.pages:
+                try:
+                    pages_text.append(p.extract_text() or "")
+                except Exception:
+                    pages_text.append("")
+            all_text = "\n".join(pages_text).strip()
+            if all_text:
+                return all_text
+        except Exception as e:
+            print("PyPDF2 error:", e)
+
+        # 3) OCR fallback (requires Tesseract installed)
+        try:
+            ocr_texts = []
+            with pdfplumber.open(io.BytesIO(data)) as pdf:
+                for page in pdf.pages:
+                    img = page.to_image(resolution=150).original  # PIL Image
+                    txt = pytesseract.image_to_string(img)
+                    ocr_texts.append(txt)
+            return "\n".join(ocr_texts)
+        except Exception as e:
+            print("OCR failed or pytesseract not available:", e)
+            return ""
+
+    # Unknown type: try decode
+    try:
+        return data.decode("utf-8", errors="ignore")
+    except:
+        return data.decode("latin-1", errors="ignore")
+
+# import re # Already imported
+def strip_pii(text):
+    text = re.sub(r'\S+@\S+\.\S+', '[email]', text)
+    text = re.sub(r'\+?\d[\d\s\-\(\)]{6,}\d', '[phone]', text)
+    # remove possible addresses or other sensitive tokens if needed
+    return text
+# ... End of omitted section ...
+
 # ---------- AI Helper functions ----------
 def genai_generate(prompt, max_output_tokens=512, temperature=0.0):
     """Call Gemini and return text, or None on error."""
     if not AI_AVAILABLE:
         return None
     try:
+        # Using the standard SDK model generation
         resp = genai.generate_content(
             model=MODEL_NAME,
             prompt=prompt,
@@ -319,6 +420,10 @@ seed_badges()
 
 # ---------- DB helpers ----------
 def store_recommended_courses(user_id, missing_skills, courses_df):
+    # FIX: Clear ALL pending courses before recommending new ones
+    c.execute("DELETE FROM user_course WHERE user_id=? AND status IN ('pending', 'in_progress')", (user_id,))
+    conn.commit() # Commit the deletion
+    
     for skill in missing_skills:
         matches = courses_df[courses_df['skill'].str.lower() == skill]
         if matches.empty:
@@ -337,7 +442,8 @@ def get_user_courses(user_id):
 
 def update_course_status(course_id, status, progress):
     now = datetime.utcnow().isoformat()
-    c.execute("UPDATE user_course SET status=?, progress=?, enrolled_at=? WHERE id=?", (status, progress, now))
+    # FIX: Corrected the number of bindings to 4 (status, progress, now, course_id)
+    c.execute("UPDATE user_course SET status=?, progress=?, enrolled_at=? WHERE id=?", (status, progress, now, course_id))
     conn.commit()
 
 def store_quiz_result(user_id, skill, score):
@@ -455,7 +561,7 @@ with st.sidebar:
         c = conn.cursor()
         add_demo_user()
         seed_badges()
-        st.experimental_rerun()
+        st.rerun() # FIX: Use st.rerun()
     st.markdown("---")
     st.subheader("AI Status")
     st.write("Gemini available:", AI_AVAILABLE)
@@ -463,9 +569,16 @@ with st.sidebar:
         st.write("Model:", MODEL_NAME)
 
 st.header("1) Upload / Paste Resume (or use sample)")
-uploaded = st.file_uploader("Upload resume text file (.txt) or paste below", type=["txt"])
-resume_text = uploaded.read().decode('utf-8') if uploaded else ""
-resume_area = st.text_area("Or paste resume text here", value=resume_text, height=150)
+# Accept txt, pdf, docx uploads
+uploaded = st.file_uploader("Upload resume file (.txt, .pdf, .docx) or paste below", type=["txt","pdf","docx"])
+resume_text_from_file = ""
+if uploaded:
+    with st.spinner("Parsing uploaded file..."):
+        resume_text_from_file = parse_resume(uploaded)
+        if not resume_text_from_file:
+            st.warning("Could not extract text from the uploaded file. If this is a scanned PDF, enable OCR or upload a text PDF / DOCX.")
+# Provide a text area for pasting or review extracted text
+resume_area = st.text_area("Or paste resume text here", value=resume_text_from_file or "", height=150)
 
 st.header("2) Paste Target Job Description")
 job_area = st.text_area("Job description text", height=150)
@@ -502,9 +615,19 @@ with col2:
 st.markdown("---")
 st.header("Dashboard")
 
+# FIX: Ensure these variables are defined on app startup (to fix NameError)
 u_sk = st.session_state.get('user_skills', [])
 j_sk = st.session_state.get('job_skills', [])
-missing= st.session_state.get('missing', [])
+missing = st.session_state.get('missing', [])
+
+if 'user_skills' not in st.session_state:
+    st.session_state['user_skills'] = []
+    st.session_state['job_skills'] = []
+    st.session_state['missing'] = []
+    u_sk = []
+    j_sk = []
+    missing = []
+# --- End of Initialization Fix ---
 
 st.subheader("Extracted Skills")
 st.write("User skills:", u_sk)
@@ -513,32 +636,61 @@ st.write("Missing skills:", missing)
 
 st.subheader("Recommended Courses")
 uc_df = get_user_courses(USER_ID)
+
+# FILTER: Show only courses for skills missing in the latest analysis
+if missing:
+    uc_df = uc_df[uc_df['skill'].isin(missing)]
+
 if uc_df.empty:
-    st.info("No recommendations yet. Click Analyze.")
+    st.info("No recommendations yet. Click Analyze to find your skill gaps.")
 else:
     for _,row in uc_df.iterrows():
-        with st.container():
-            st.markdown(f"**Skill:** {row['skill'].title()}  |  **Course:** {row['title']} ({row['provider']})")
-            st.write(row['url'])
-            cols = st.columns([1,1,1,1,3])
-            if cols[0].button("Start Course", key=f"start_{row['id']}"):
-                update_course_status(row['id'], 'in_progress', 50)
-                award_points(USER_ID, 5, f"Started course {row['title']}")
-                st.experimental_rerun()
-            if cols[1].button("Mark Completed", key=f"complete_{row['id']}"):
-                update_course_status(row['id'], "completed", 100)
-                award_points(USER_ID, 50, f"Completed course {row['title']}")
-                completed_count = c.execute("""SELECT COUNT(*) FROM user_course WHERE user_id=? AND status='completed'""", (USER_ID,)).fetchone()[0]
-                if completed_count >= 5:
-                    award_badge(USER_ID, "COURSE_FINISHER")
-                st.experimental_rerun()
-            if cols[2].button("Sync (simulate)", key=f"sync_{row['id']}"):
-                newp = min(100, int(row['progress'] or 0) + 25)
-                status = "in_progress" if newp < 100 else "completed"
-                update_course_status(row['id'], status, newp)
-                st.experimental_rerun()
-            # AI Plan button
-            if AI_AVAILABLE and cols[3].button("AI Plan", key=f"aiplan_{row['id']}"):
+        current_status = row['status']
+        with st.container(border=True):
+            st.markdown(f"**Skill:** {row['skill'].title()}  |  **Course:** {row['title']} ({row['provider']}) | **Status:** {current_status.upper()}")
+            
+            # Adjusted column widths
+            cols = st.columns([1.5, 2, 2, 1, 3]) 
+
+            # Button 1: Start Course (if pending)
+            if current_status == 'pending':
+                if cols[0].button("Start Course", key=f"start_{row['id']}"):
+                    # Sets status to in_progress (0%)
+                    update_course_status(row['id'], 'in_progress', 0) 
+                    # FIX: Awards 10 points for starting
+                    award_points(USER_ID, 10, f"Started course {row['title']}")
+                    st.rerun()
+            else:
+                cols[0].write(f"Progress: {row['progress']}%")
+
+            # Button 2: Go to Course (Link) - Always visible
+            cols[1].link_button("Go to Course ➡️", row['url'], help="Opens the course link in a new tab.")
+
+            # Buttons 3 & 4: Active buttons only shown if course is not completed
+            if current_status != 'completed':
+                if cols[2].button("Complete (Take Quiz)", key=f"quiz_trigger_{row['id']}"):
+                    # FIX: Trigger the quiz and store course ID
+                    st.session_state['active_quiz'] = row['skill']
+                    st.session_state['course_id_to_complete'] = row['id']
+                    st.rerun()
+                
+                # Button 4: Sync (Simulate Progress) - Used for the "Go to Course" point proxy
+                if cols[3].button("Sync", key=f"sync_{row['id']}"):
+                    # FIX: Awards 10 points for engagement ("Go to Course" proxy)
+                    award_points(USER_ID, 10, f"Simulated course progress sync for {row['title']}") 
+
+                    # Advance progress slightly
+                    newp = min(100, int(row['progress'] or 0) + 25)
+                    status = "in_progress" if newp < 100 else "completed"
+                    update_course_status(row['id'], status, newp)
+                    st.rerun()
+            else:
+                 # When completed
+                 cols[2].write("COMPLETED")
+                 cols[3].write("") 
+
+            # AI Plan button (cols[4]) - Logic unchanged
+            if AI_AVAILABLE and cols[4].button("AI Plan", key=f"aiplan_{row['id']}"):
                 with st.spinner("Generating AI learning plan..."):
                     profile_text = resume_area or "Learner with basic skills"
                     plan = generate_learning_path(profile_text, row['skill'], target_role=None, weeks=4)
@@ -550,7 +702,10 @@ else:
                         st.json(plan)
                     else:
                         st.error("AI plan generation failed.")
+            
+            # Progress bar for visual feedback
             st.progress(int(row['progress'] or 0))
+
 
 st.markdown("---")
 st.header("Quizzes & Verification")
@@ -571,7 +726,7 @@ for skill in missing:
                         # reload quiz_bank from file
                         quiz_bank = load_quizbank()
                         st.success("AI quiz generated and stored.")
-                        st.experimental_rerun()
+                        st.rerun()
                     else:
                         st.error("AI quiz generation failed.")
         else:
@@ -590,19 +745,46 @@ if st.session_state.get('active_quiz'):
             correct = 0
             for i,q in enumerate(questions):
                 chosen = st.session_state.get(f"{qskill}_q_{i}")
-                chosen_idx = q['options'].index(chosen) if chosen in q['options'] else -1
+                # Check chosen against options and get index
+                try:
+                    chosen_idx = q['options'].index(chosen)
+                except ValueError:
+                    chosen_idx = -1 # Not chosen or invalid choice
+                    
                 if chosen_idx == q['correct']:
                     correct += 1
+                    
             score_pct = int(round(100 * correct / len(questions))) if questions else 0
             store_quiz_result(USER_ID, qskill, score_pct)
+            
             if score_pct >= 60:
+                # 1. Award points for passing quiz
                 award_points(USER_ID, 30, f"Quiz passed {qskill} ({score_pct}%)")
+                
+                # 2. Mark the relevant course as completed 
+                course_id = st.session_state.get('course_id_to_complete')
+                if course_id:
+                    update_course_status(course_id, "completed", 100) 
+                    award_points(USER_ID, 50, f"Completed course for skill {qskill}")
+                    
+                    # Check for COURSE_FINISHER badge here
+                    completed_count = c.execute("""SELECT COUNT(*) FROM user_course WHERE user_id=? AND status='completed'""", (USER_ID,)).fetchone()[0]
+                    if completed_count >= 5:
+                        award_badge(USER_ID, "COURSE_FINISHER")
+                    
+                    del st.session_state['course_id_to_complete'] # Clean up session state
+
+                # 3. Check for QUIZ_MASTER badge
                 passed_quizzes = c.execute("SELECT COUNT(*) FROM user_quiz WHERE user_id=? AND score>=60", (USER_ID,)).fetchone()[0]
                 if passed_quizzes >= 5:
                     award_badge(USER_ID, "QUIZ_MASTER")
-            st.success(f"Quiz submitted. Score: {score_pct}%")
+                
+                st.success(f"Quiz submitted. Score: {score_pct}%. Associated course marked completed.")
+            else:
+                st.error(f"Quiz submitted. Score: {score_pct}%. You need 60% to pass.")
+
             st.session_state['active_quiz'] = None
-            st.experimental_rerun()
+            st.rerun()
 
 st.markdown("### Compute Verification (P=progress, Q=quiz score, R=resume evidence)")
 if st.button("Recompute Verification for all missing skills"):
@@ -620,7 +802,7 @@ if st.button("Recompute Verification for all missing skills"):
         status = determine_status(final)
         set_skill_verification(USER_ID, skill, final, status)
     st.success("Verification computed.")
-    st.experimental_rerun()
+    st.rerun()
 
 st.markdown("### Skill Verification Records")
 for skill in missing:
