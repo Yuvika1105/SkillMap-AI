@@ -5,7 +5,8 @@ import sqlite3
 import json
 import os
 import re
-from datetime import datetime
+# FIX: Import timezone explicitly for compatibility with older Python versions (<3.11)
+from datetime import datetime, timezone 
 from dotenv import load_dotenv
 # for resume parsing
 import io
@@ -129,7 +130,6 @@ def parse_resume(uploaded_file):
     try: return data.decode("utf-8", errors="ignore")
     except: return data.decode("latin-1", errors="ignore")
 
-# FIX: Moved PII/Sanitization functions here so they are defined before ATS calls.
 def strip_pii(text):
     text = re.sub(r'\S+@\S+\.\S+', '[email]', text)
     text = re.sub(r'\+?\d[\d\s\-\(\)]{6,}\d', '[phone]', text)
@@ -140,20 +140,17 @@ def sanitize_for_ats(text):
     t = re.sub(r'\S+@\S+\.\S+', '[email]', t)
     t = re.sub(r'\+?\d[\d\s\-\(\)]{6,}\d', '[phone]', t)
     return t[:4000]
-# END OF FIX MOVEMENT
 
 # ---------- AI Helper functions ----------
-# FIX: All AI functions now accept the 'client' object as the first parameter.
 
 def genai_generate(client, prompt, max_output_tokens=512, temperature=0.0):
     """Call Gemini and return text, or None on error."""
     if not AI_AVAILABLE:
         return None
     try:
-        # FINAL FIX: Use keyword arguments exclusively to avoid positional argument conflict
         resp = client.models.generate_content(
-            contents=prompt,
-            model=MODEL_NAME, # Explicitly passed as keyword
+            contents=prompt, 
+            model=MODEL_NAME, 
             config={
                 "candidate_count": 1,
                 "temperature": temperature,
@@ -171,41 +168,49 @@ def genai_generate(client, prompt, max_output_tokens=512, temperature=0.0):
 def genai_generate_json(client, prompt, schema_example, max_tokens=512, temperature=0.0):
     """Ask model to return JSON matching example. Returns parsed JSON or None."""
     if not AI_AVAILABLE: return None
+    
+    # FIX: Define 'example' and 'wrapper' outside try block to prevent NameError
+    example = json.dumps(schema_example, indent=2)
+    wrapper = (f"Return ONLY valid JSON that matches the example schema exactly. "
+               f"Do NOT include any explanation or extra text. Start and end with brackets.\n\n"
+               f"EXAMPLE:\n{example}\n\nPROMPT:\n{prompt}")
+    
+    # FIX: Initialize 'raw' to prevent NameError if genai_generate fails internally
+    raw = None 
+
     try:
-        example = json.dumps(schema_example, indent=2)
-        wrapper = ("Return ONLY valid JSON that matches the example schema exactly. "
-                   "Do NOT include any explanation.\n\n"
-                   f"EXAMPLE:\n{example}\n\nPROMPT:\n{prompt}")
-        # FIX: Pass client object
         raw = genai_generate(client, wrapper, max_output_tokens=max_tokens, temperature=temperature)
         
-        if not raw: return None
+        if not raw: return None 
         
         # FIX: Robustly find JSON structure even if wrapped in markdown/text
         raw_text = raw.strip()
-        
-        if raw_text.startswith('```json'):
-            # Strip markdown code block wrappers
-            json_text = raw_text.strip('`').strip('json').strip()
-        else:
-            # Fallback to finding surrounding brackets
-            start = raw_text.find('{')
-            end = raw_text.rfind('}')
-            if start == -1: # Try array structure if object fails
-                start = raw_text.find('[')
-                end = raw_text.rfind(']')
+        json_text = raw_text
 
-            if start != -1 and end != -1:
-                json_text = raw_text[start:end+1]
-            else:
-                return None # Failed to find valid JSON structure
+        # 1. Strip markdown code block wrappers
+        if raw_text.startswith('```'):
+            json_text = re.sub(r"^\s*`{3}(json)?\s*|`{3}\s*$", "", raw_text, flags=re.DOTALL).strip()
+        
+        # 2. Fallback to finding surrounding brackets (prioritizing array for quizzes)
+        start = json_text.find('[')
+        end = json_text.rfind(']')
+
+        if start == -1 or end == -1: # Try object structure if array fails
+            start = json_text.find('{')
+            end = json_text.rfind('}')
+
+        if start != -1 and end != -1 and start < end:
+            json_text = json_text[start:end+1]
+        else:
+            print(f"JSON Extraction failed. Raw response was: {raw}")
+            return None 
         
         return json.loads(json_text)
     except Exception as e:
-        print("GenAI JSON parse error:", e)
+        print(f"GenAI JSON parse error: {e}")
         return None
 
-def generate_quiz_for_skill(client, skill_name, num_questions=10): # FIX: Default changed to 10
+def generate_quiz_for_skill(client, skill_name, num_questions=3): 
     """Returns list of questions (question, options, correct)."""
     cache = {}
     if os.path.exists(AI_QUIZ_CACHE): cache = json.load(open(AI_QUIZ_CACHE, encoding='utf-8'))
@@ -213,28 +218,38 @@ def generate_quiz_for_skill(client, skill_name, num_questions=10): # FIX: Defaul
     
     prompt = f"""Generate {num_questions} multiple-choice questions to test a learner on the skill: "{skill_name}".
 For each question return: - question: short question text (max 120 chars) - options: list of 4 answer options - correct: the index (0..3) of the correct option
-Return a JSON array of questions."""
+Return a JSON array of questions. Crucially, return ONLY the JSON array (starting with '[') and nothing else."""
+    
     schema_example = [{"question": "Example: What does SQL stand for?",
                        "options": ["Structured Query Language", "Simple Query Language", "Sequential Query Language", "Server Query Language"],
                        "correct": 0}]
     
-    # FIX: Pass client object
     j = genai_generate_json(client, prompt, schema_example, max_tokens=600, temperature=0.2)
     
     if not j or not isinstance(j, list): return None
     
     cleaned = []
     for item in j[:num_questions]:
-        if all(k in item for k in ("question","options","correct")):
-            cleaned.append({"question": item["question"], "options": item["options"],
-                            "correct": int(item["correct"]) if isinstance(item["correct"], int) else 0})
+        if all(k in item for k in ("question","options","correct")) and isinstance(item["options"], list) and len(item["options"]) == 4:
+            try:
+                correct_idx = int(item["correct"])
+            except:
+                correct_idx = 0 
+
+            cleaned.append({"question": item["question"], 
+                            "options": item["options"],
+                            "correct": correct_idx})
     
     if cleaned:
+        # Update AI Quiz Cache
         cache[skill_name] = cleaned
         with open(AI_QUIZ_CACHE, "w", encoding="utf-8") as f: json.dump(cache, f, indent=2)
+        
+        # Update Quiz Bank (QUIZ_JSON)
         qb = load_quizbank()
-        qb.setdefault(skill_name, cleaned)
+        qb[skill_name] = cleaned
         with open(QUIZ_JSON, "w", encoding='utf-8') as f: json.dump(qb, f, indent=2)
+        
         return cleaned
     return None
 
@@ -248,12 +263,11 @@ def generate_learning_path(client, user_profile_text, skill_name, target_role=No
 User profile: {user_profile_text}
 If target role is provided, tailor the plan to that role: {target_role}
 For each week provide 2-4 actionable goals and 1-3 recommended resources (title + short url if possible).
-Return JSON with keys: skill, summary, estimated_hours, weekly_plan (array), assessment."""
+Return JSON with keys: skill, summary, estimated_hours, weekly_plan (array), assessment. Return ONLY the JSON object (starting with '{{') and nothing else."""
     schema_example = {"skill": skill_name, "summary": "One-line summary", "estimated_hours": 20,
         "weekly_plan": [{"week": 1, "goals": ["..."], "resources": ["..."]}],
         "assessment": "One sentence"}
     
-    # FIX: Pass client object
     j = genai_generate_json(client, prompt, schema_example, max_tokens=600, temperature=0.2)
     
     if j:
@@ -267,17 +281,16 @@ def ats_match_and_suggestions(client, resume_text, job_description_text, top_n=3
     job_clean = sanitize_for_ats(job_description_text)
     
     prompt = f"""You are an ATS expert. Compare resume and job description.
-Return JSON:{{ "score": <0-100 integer>, "explanation": "one paragraph", "suggestions": ["s1","s2","s3"] }}
+Return JSON:{{ "score": <0-100 integer>, "explanation": "one paragraph", "suggestions": ["s1","s2","s3"] }}. Return ONLY the JSON object (starting with '{{') and nothing else.
 Resume:{resume_clean}
 Job Description:{job_clean}
-Return only JSON."""
+"""
     example = {"score": 70, "explanation": "short", "suggestions": ["s1","s2","s3"]}
     
-    # FIX: Pass client object
     j = genai_generate_json(client, prompt, example, max_tokens=400, temperature=0.0)
     return j
 
-# ---------- DATABASE & GAMIFICATION (Unchanged Logic) ----------
+# ---------- DATABASE & GAMIFICATION ----------
 def ensure_db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     c = conn.cursor()
@@ -316,6 +329,8 @@ seed_badges()
 def store_recommended_courses(user_id, missing_skills, courses_df):
     c.execute("DELETE FROM user_course WHERE user_id=? AND status IN ('pending', 'in_progress')", (user_id,))
     conn.commit() 
+    # FIX: Use timezone.utc for compatibility
+    now = datetime.now(timezone.utc).isoformat()
     for skill in missing_skills:
         matches = courses_df[courses_df['skill'].str.lower() == skill]
         if matches.empty: continue
@@ -323,19 +338,21 @@ def store_recommended_courses(user_id, missing_skills, courses_df):
             c.execute("SELECT id FROM user_course WHERE user_id=? AND skill=? AND title=?", (user_id, skill, row['title']))
             if not c.fetchone():
                 c.execute("""INSERT INTO user_course(user_id,skill,provider,title,url,status,progress,enrolled_at)
-                              VALUES (?,?,?,?,?,?,?,?)""",
-                          (user_id, skill, row['provider'], row['title'], row['url'], "pending", 0, None))
+                             VALUES (?,?,?,?,?,?,?,?)""",
+                            (user_id, skill, row['provider'], row['title'], row['url'], "pending", 0, now))
     conn.commit()
 
 def get_user_courses(user_id): return pd.read_sql_query("SELECT * FROM user_course WHERE user_id=?", conn, params=(user_id,))
 
 def update_course_status(course_id, status, progress):
-    now = datetime.utcnow().isoformat()
+    # FIX: Use timezone.utc for compatibility
+    now = datetime.now(timezone.utc).isoformat()
     c.execute("UPDATE user_course SET status=?, progress=?, enrolled_at=? WHERE id=?", (status, progress, now, course_id))
     conn.commit()
 
 def store_quiz_result(user_id, skill, score):
-    now = datetime.utcnow().isoformat()
+    # FIX: Use timezone.utc for compatibility
+    now = datetime.now(timezone.utc).isoformat()
     c.execute("INSERT INTO user_quiz(user_id,skill,score,taken_at) VALUES (?,?,?,?)", (user_id, skill, score, now))
     conn.commit()
 
@@ -344,7 +361,8 @@ def latest_quiz_score(user_id, skill):
     return int(row[0]) if row else 0
 
 def set_skill_verification(user_id, skill, final_score, status):
-    now = datetime.utcnow().isoformat() if status == "VERIFIED" else None
+    # FIX: Use timezone.utc for compatibility
+    now = datetime.now(timezone.utc).isoformat() if status == "VERIFIED" else None
     row = c.execute("SELECT id FROM skill_ver WHERE user_id=? AND skill=?", (user_id, skill)).fetchone()
     if row:
         c.execute("UPDATE skill_ver SET final_score=?, status=?, verified_at=? WHERE id=?", (final_score, status, now, row[0]))
@@ -361,7 +379,8 @@ def latest_skill_ver(user_id, skill):
     return {"final_score": row[0], "status": row[1], "verified_at": row[2]} if row else {"final_score": 0, "status": "NOT_VERIFIED", "verified_at": None}
 
 def award_points(user_id, points, reason):
-    now = datetime.utcnow().isoformat()
+    # FIX: Use timezone.utc for compatibility
+    now = datetime.now(timezone.utc).isoformat()
     c.execute("INSERT INTO points_log(user_id,points,reason,timestamp) VALUES (?,?,?,?)", (user_id, points, reason, now))
     c.execute("UPDATE users SET points = points + ? WHERE id=?", (points, user_id))
     user_points = c.execute("SELECT points FROM users WHERE id=?", (user_id,)).fetchone()[0]
@@ -377,7 +396,8 @@ def award_badge(user_id, badge_code):
     badge_id = row[0]
     already = c.execute("SELECT id FROM user_badges WHERE user_id=? AND badge_id=?", (user_id, badge_id)).fetchone()
     if already: return
-    now = datetime.utcnow().isoformat()
+    # FIX: Use timezone.utc for compatibility
+    now = datetime.now(timezone.utc).isoformat()
     c.execute("INSERT INTO user_badges(user_id,badge_id,awarded_at) VALUES (?,?,?)", (user_id, badge_id, now))
     conn.commit()
 
@@ -387,8 +407,8 @@ def get_user_profile(user_id):
 
 def get_user_badges(user_id):
     rows = c.execute("""SELECT b.code,b.title,b.description,ub.awarded_at
-                        FROM user_badges ub JOIN badges b ON ub.badge_id = b.id
-                        WHERE ub.user_id=?""", (user_id,)).fetchall()
+                         FROM user_badges ub JOIN badges b ON ub.badge_id = b.id
+                         WHERE ub.user_id=?""", (user_id,)).fetchall()
     return [{"code": r[0], "title": r[1], "description": r[2], "awarded_at": r[3]} for r in rows]
 
 def compute_final_score(P, Q, R): return int(round(0.5*P + 0.4*Q + 0.1*R))
@@ -401,10 +421,11 @@ def determine_status(final_score):
 # --- COVER LETTER PDF UTILITIES ---
 def generate_pdf(text):
     cleaned_text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('ascii')
+    
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", size=12)
-    for line in cleaned_text.split('\n'): pdf.multi_cell(0, 10, line)
+    pdf.multi_cell(0, 5, cleaned_text) 
     return pdf.output(dest='S').encode('latin-1')
 
 def download_pdf_button(text):
@@ -422,6 +443,9 @@ st.set_page_config(page_title="SkillMap AI Master App", layout="wide")
 skills = load_skills()
 courses_df = load_courses()
 quiz_bank = load_quizbank()
+# Initialize active quiz state
+if 'active_quiz' not in st.session_state: st.session_state['active_quiz'] = None
+if 'course_id_to_complete' not in st.session_state: st.session_state['course_id_to_complete'] = None
 
 # Sidebar setup
 with st.sidebar:
@@ -429,7 +453,6 @@ with st.sidebar:
     st.markdown("---")
     
     st.header("Profile")
-    # FIX: USER_ID is defined globally
     profile = get_user_profile(USER_ID)
     if profile:
         st.write(f"**{profile['name']}**")
@@ -449,6 +472,11 @@ with st.sidebar:
         try: conn.close()
         except: pass
         if os.path.exists(DB_PATH): os.remove(DB_PATH)
+        if os.path.exists(AI_QUIZ_CACHE): os.remove(AI_QUIZ_CACHE)
+        if os.path.exists(QUIZ_JSON): os.remove(QUIZ_JSON)
+        for f in os.listdir(AI_PLAN_DIR):
+            os.remove(os.path.join(AI_PLAN_DIR, f))
+
         conn = ensure_db()
         c = conn.cursor()
         add_demo_user()
@@ -462,7 +490,6 @@ with st.sidebar:
 
 # --- MAIN PAGE RENDERING ---
 
-# FIX: Pass all necessary global data variables as arguments to the function
 def render_skillmap_dashboard(skills, courses_df, quiz_bank):
     st.title("SkillMap AI — Dashboard (with Gamification & Gemini)")
 
@@ -482,7 +509,6 @@ def render_skillmap_dashboard(skills, courses_df, quiz_bank):
     col1, col2 = st.columns(2)
     with col1:
         if st.button("Analyze (Extract skills & Recommend)"):
-            # FIX: Use passed arguments
             user_skills = extract_skills_from_text(resume_area, skills)
             job_skills  = extract_skills_from_text(job_area, skills)
             missing = [s for s in job_skills if s not in user_skills]
@@ -493,7 +519,6 @@ def render_skillmap_dashboard(skills, courses_df, quiz_bank):
             st.success("Analysis done. Recommendations stored.")
     with col2:
         if st.button("Upload as 'after-learning' resume (evidence)"):
-            # FIX: Use passed arguments
             user_skills_after = extract_skills_from_text(resume_area, skills)
             st.session_state['user_skills_after'] = user_skills_after
             st.success("After-learning resume stored (used as R evidence).")
@@ -583,7 +608,9 @@ def render_skillmap_dashboard(skills, courses_df, quiz_bank):
 
     st.markdown("---")
     st.header("Quizzes & Verification")
-
+    
+    # Reload logic is now in the main script block (see bottom)
+    
     for skill in missing:
         st.subheader(skill.title())
         last_score = latest_quiz_score(USER_ID, skill)
@@ -597,21 +624,19 @@ def render_skillmap_dashboard(skills, courses_df, quiz_bank):
             if AI_AVAILABLE:
                 if st.button(f"AI Generate Quiz for: {skill}", key=f"genquiz_{skill}"):
                     with st.spinner("Generating quiz via Gemini..."):
-                        q = generate_quiz_for_skill(client, skill, num_questions=10) # 10 questions
+                        q = generate_quiz_for_skill(client, skill, num_questions=3) # 10 questions
                         if q:
-                            # FIX: Reload quiz_bank *globally* after creation
                             st.session_state['quiz_bank_reloaded'] = True
                             st.success("AI quiz generated and stored. Rerunning to load questions.")
                             st.rerun()
                         else:
-                            st.error("AI quiz generation failed.")
+                            st.error("AI quiz generation failed. Check API key and logs.")
             else:
                 st.info("No quiz available for this skill. AI is disabled.")
 
     if st.session_state.get('active_quiz'):
         qskill = st.session_state['active_quiz']
         st.subheader(f"Quiz: {qskill}")
-        # FIX: Access quiz_bank using the passed argument
         questions = quiz_bank.get(qskill, [])
         if not questions:
              st.warning("No questions available. Please use 'AI Generate Quiz' first.")
@@ -629,7 +654,7 @@ def render_skillmap_dashboard(skills, courses_df, quiz_bank):
                         try: chosen_idx = q['options'].index(chosen)
                         except ValueError: chosen_idx = -1 
                         if chosen_idx == q['correct']: correct += 1
-                            
+                        
                     score_pct = int(round(100 * correct / len(questions))) if questions else 0
                     store_quiz_result(USER_ID, qskill, score_pct)
                     
@@ -725,10 +750,9 @@ def render_cover_letter_generator():
             Format the output strictly as the letter content, starting with the date line.
             """
             try:
-                # FINAL FIX: Use keyword arguments to prevent positional conflict
                 response = client.models.generate_content(
-                    contents=prompt, # Prompt is contents=
-                    model=MODEL_NAME # Model name is model=
+                    contents=prompt, 
+                    model=MODEL_NAME 
                 )
                 cover_letter = response.text
 
@@ -747,7 +771,6 @@ def render_cover_letter_generator():
                         --- COVER LETTER --- {cover_letter}
                         --- JOB DESCRIPTION --- {job_description}
                         """
-                        # FINAL FIX: Use keyword arguments
                         ats_response = client.models.generate_content(
                             contents=ats_prompt, 
                             model=MODEL_NAME
@@ -762,8 +785,14 @@ def render_cover_letter_generator():
 
 
 # --- RENDER MAIN PAGE ---
+
+# FIX: Add global quiz_bank reload logic here, outside any function, to correctly update 
+# the global variable before it's passed as an argument.
+if 'quiz_bank_reloaded' in st.session_state and st.session_state['quiz_bank_reloaded']:
+    quiz_bank = load_quizbank()
+    del st.session_state['quiz_bank_reloaded']
+
 if selected_page == "SkillMap Dashboard":
-    # FIX: Pass global data variables into the rendering function
     render_skillmap_dashboard(skills, courses_df, quiz_bank)
 elif selected_page == "Cover Letter Generator ✉️":
     render_cover_letter_generator()
