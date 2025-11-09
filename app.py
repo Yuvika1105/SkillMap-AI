@@ -1,26 +1,21 @@
-# app.py -- SkillMap AI MVP with Gamification + Gemini helpers (Streamlit)
 import streamlit as st
 import pandas as pd
+import io
+import pdfplumber
+import docx
 import sqlite3
 import json
 import os
 import re
-# FIX: Import timezone explicitly for compatibility with older Python versions (<3.11)
 from datetime import datetime, timezone 
 from dotenv import load_dotenv
-# for resume parsing
-import io
-import pdfplumber
-import docx
 from PIL import Image
 import pytesseract
 from PyPDF2 import PdfReader
-# For Cover Letter Feature
 from fpdf import FPDF
 import base64
 import unicodedata
 
-# ---------------- AI imports ----------------
 try:
     import google.generativeai as genai
     from google import genai as genai_client
@@ -28,19 +23,16 @@ try:
 except Exception:
     AI_AVAILABLE = False
 
-# ---------- CONFIG ----------
-load_dotenv()  # reads .env for GOOGLE_API_KEY
+load_dotenv()  
 DATA_DIR = "data"
 DB_PATH = os.path.join(DATA_DIR, "skillmap.db")
 SKILLS_CSV = os.path.join(DATA_DIR, "skills.csv")
 COURSES_CSV = os.path.join(DATA_DIR, "courses.csv")
 QUIZ_JSON = os.path.join(DATA_DIR, "quiz_bank.json")
-# cache directories for AI outputs
 AI_QUIZ_CACHE = os.path.join(DATA_DIR, "ai_quizzes.json")
 AI_PLAN_DIR = os.path.join(DATA_DIR, "ai_plans")
 os.makedirs(AI_PLAN_DIR, exist_ok=True)
 
-# configure Gemini if available
 if AI_AVAILABLE:
     API_KEY = os.getenv("GOOGLE_API_KEY")
     if API_KEY:
@@ -49,13 +41,10 @@ if AI_AVAILABLE:
     else:
         AI_AVAILABLE = False
 
-# FIX: Changed model name to a stable, supported identifier
 MODEL_NAME = "gemini-2.5-flash"
 
-# FIX: Define USER_ID globally for demo user access
 USER_ID = 1
 
-# ---------- UTILITIES ----------
 def ensure_data_dir():
     if not os.path.exists(DATA_DIR):
         os.makedirs(DATA_DIR)
@@ -68,16 +57,16 @@ def load_skills():
     if not os.path.exists(SKILLS_CSV): return []
     return [line.strip().lower() for line in open(SKILLS_CSV, encoding='utf-8') if line.strip()]
 
-def load_courses():
+def loadCourses():
     if not os.path.exists(COURSES_CSV):
         return pd.DataFrame(columns=["skill","provider","title","url"])
     return pd.read_csv(COURSES_CSV)
 
-def load_quizbank():
+def loadQuizbank():
     if not os.path.exists(QUIZ_JSON): return {}
     return json.load(open(QUIZ_JSON, encoding='utf-8'))
 
-def extract_skills_from_text(text, skills):
+def extractSkills(text, skills):
     text = normalize_text(text)
     found = []
     for s in skills:
@@ -85,12 +74,10 @@ def extract_skills_from_text(text, skills):
             found.append(s)
     return sorted(set(found))
 
-# Resume Parsing functions
-def parse_resume(uploaded_file):
-    """ Accepts a Streamlit UploadedFile and returns extracted plain text. """
-    if uploaded_file is None: return ""
-    fname = uploaded_file.name.lower()
-    data = uploaded_file.read()
+def parseResume(uploadedfile):
+    if uploadedfile is None: return ""
+    fname = uploadedfile.name.lower()
+    data = uploadedfile.read()
     if fname.endswith(".txt"):
         try: return data.decode("utf-8", errors="ignore")
         except: return data.decode("latin-1", errors="ignore")
@@ -103,12 +90,12 @@ def parse_resume(uploaded_file):
             return ""
     if fname.endswith(".pdf"):
         try:
-            text_pages = []
+            textPages = []
             with pdfplumber.open(io.BytesIO(data)) as pdf:
                 for page in pdf.pages:
                     txt = page.extract_text()
-                    if txt: text_pages.append(txt)
-            all_text = "\n".join(text_pages).strip()
+                    if txt: textPages.append(txt)
+            all_text = "\n".join(textPages).strip()
             if all_text: return all_text
         except Exception: pass
         try: 
@@ -135,13 +122,12 @@ def strip_pii(text):
     text = re.sub(r'\+?\d[\d\s\-\(\)]{6,}\d', '[phone]', text)
     return text
 
-def sanitize_for_ats(text):
+def sanitizeAts(text):
     t = text or ""
     t = re.sub(r'\S+@\S+\.\S+', '[email]', t)
     t = re.sub(r'\+?\d[\d\s\-\(\)]{6,}\d', '[phone]', t)
     return t[:4000]
 
-# ---------- AI Helper functions ----------
 
 def genai_generate(client, prompt, max_output_tokens=512, temperature=0.0):
     """Call Gemini and return text, or None on error."""
@@ -165,17 +151,15 @@ def genai_generate(client, prompt, max_output_tokens=512, temperature=0.0):
         print("Gemini error:", e)
         return None
 
-def genai_generate_json(client, prompt, schema_example, max_tokens=512, temperature=0.0):
+def genaiJson(client, prompt, schema_example, max_tokens=512, temperature=0.0):
     """Ask model to return JSON matching example. Returns parsed JSON or None."""
     if not AI_AVAILABLE: return None
     
-    # FIX: Define 'example' and 'wrapper' outside try block to prevent NameError
     example = json.dumps(schema_example, indent=2)
     wrapper = (f"Return ONLY valid JSON that matches the example schema exactly. "
                f"Do NOT include any explanation or extra text. Start and end with brackets.\n\n"
                f"EXAMPLE:\n{example}\n\nPROMPT:\n{prompt}")
     
-    # FIX: Initialize 'raw' to prevent NameError if genai_generate fails internally
     raw = None 
 
     try:
@@ -183,35 +167,31 @@ def genai_generate_json(client, prompt, schema_example, max_tokens=512, temperat
         
         if not raw: return None 
         
-        # FIX: Robustly find JSON structure even if wrapped in markdown/text
         raw_text = raw.strip()
-        json_text = raw_text
+        jsontext = raw_text
 
-        # 1. Strip markdown code block wrappers
         if raw_text.startswith('```'):
-            json_text = re.sub(r"^\s*`{3}(json)?\s*|`{3}\s*$", "", raw_text, flags=re.DOTALL).strip()
+            jsontext = re.sub(r"^\s*`{3}(json)?\s*|`{3}\s*$", "", raw_text, flags=re.DOTALL).strip()
         
-        # 2. Fallback to finding surrounding brackets (prioritizing array for quizzes)
-        start = json_text.find('[')
-        end = json_text.rfind(']')
+        start = jsontext.find('[')
+        end = jsontext.rfind(']')
 
-        if start == -1 or end == -1: # Try object structure if array fails
-            start = json_text.find('{')
-            end = json_text.rfind('}')
+        if start == -1 or end == -1: 
+            start = jsontext.find('{')
+            end = jsontext.rfind('}')
 
         if start != -1 and end != -1 and start < end:
-            json_text = json_text[start:end+1]
+            jsontext = jsontext[start:end+1]
         else:
             print(f"JSON Extraction failed. Raw response was: {raw}")
             return None 
         
-        return json.loads(json_text)
+        return json.loads(jsontext)
     except Exception as e:
         print(f"GenAI JSON parse error: {e}")
         return None
 
-def generate_quiz_for_skill(client, skill_name, num_questions=3): 
-    """Returns list of questions (question, options, correct)."""
+def generateQuiz(client, skill_name, num_questions=3): 
     cache = {}
     if os.path.exists(AI_QUIZ_CACHE): cache = json.load(open(AI_QUIZ_CACHE, encoding='utf-8'))
     if skill_name in cache: return cache[skill_name]
@@ -224,7 +204,7 @@ Return a JSON array of questions. Crucially, return ONLY the JSON array (startin
                        "options": ["Structured Query Language", "Simple Query Language", "Sequential Query Language", "Server Query Language"],
                        "correct": 0}]
     
-    j = genai_generate_json(client, prompt, schema_example, max_tokens=600, temperature=0.2)
+    j = genaiJson(client, prompt, schema_example, max_tokens=600, temperature=0.2)
     
     if not j or not isinstance(j, list): return None
     
@@ -241,20 +221,17 @@ Return a JSON array of questions. Crucially, return ONLY the JSON array (startin
                             "correct": correct_idx})
     
     if cleaned:
-        # Update AI Quiz Cache
         cache[skill_name] = cleaned
         with open(AI_QUIZ_CACHE, "w", encoding="utf-8") as f: json.dump(cache, f, indent=2)
         
-        # Update Quiz Bank (QUIZ_JSON)
-        qb = load_quizbank()
+        qb = loadQuizbank()
         qb[skill_name] = cleaned
         with open(QUIZ_JSON, "w", encoding='utf-8') as f: json.dump(qb, f, indent=2)
         
         return cleaned
     return None
 
-def generate_learning_path(client, user_profile_text, skill_name, target_role=None, weeks=4):
-    """Returns structured learning plan dict or None."""
+def generateLearningP(client, user_profile_text, skill_name, target_role=None, weeks=4):
     keyname = f"plan_{skill_name.replace(' ','_')}.json"
     path = os.path.join(AI_PLAN_DIR, keyname)
     if os.path.exists(path): return json.load(open(path, encoding='utf-8'))
@@ -268,17 +245,16 @@ Return JSON with keys: skill, summary, estimated_hours, weekly_plan (array), ass
         "weekly_plan": [{"week": 1, "goals": ["..."], "resources": ["..."]}],
         "assessment": "One sentence"}
     
-    j = genai_generate_json(client, prompt, schema_example, max_tokens=600, temperature=0.2)
+    j = genaiJson(client, prompt, schema_example, max_tokens=600, temperature=0.2)
     
     if j:
         with open(path, "w", encoding='utf-8') as f: json.dump(j, f, indent=2)
         return j
     return None
 
-def ats_match_and_suggestions(client, resume_text, job_description_text, top_n=3):
-    """Returns dict: {score:int, explanation:str, suggestions:[str]} or None on error."""
-    resume_clean = sanitize_for_ats(resume_text) 
-    job_clean = sanitize_for_ats(job_description_text)
+def atsMatch(client, resume_text, job_description_text, top_n=3):
+    resume_clean = sanitizeAts(resume_text) 
+    job_clean = sanitizeAts(job_description_text)
     
     prompt = f"""You are an ATS expert. Compare resume and job description.
 Return JSON:{{ "score": <0-100 integer>, "explanation": "one paragraph", "suggestions": ["s1","s2","s3"] }}. Return ONLY the JSON object (starting with '{{') and nothing else.
@@ -287,10 +263,9 @@ Job Description:{job_clean}
 """
     example = {"score": 70, "explanation": "short", "suggestions": ["s1","s2","s3"]}
     
-    j = genai_generate_json(client, prompt, example, max_tokens=400, temperature=0.0)
+    j = genaiJson(client, prompt, example, max_tokens=400, temperature=0.0)
     return j
 
-# ---------- DATABASE & GAMIFICATION ----------
 def ensure_db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     c = conn.cursor()
@@ -329,7 +304,6 @@ seed_badges()
 def store_recommended_courses(user_id, missing_skills, courses_df):
     c.execute("DELETE FROM user_course WHERE user_id=? AND status IN ('pending', 'in_progress')", (user_id,))
     conn.commit() 
-    # FIX: Use timezone.utc for compatibility
     now = datetime.now(timezone.utc).isoformat()
     for skill in missing_skills:
         matches = courses_df[courses_df['skill'].str.lower() == skill]
@@ -345,13 +319,11 @@ def store_recommended_courses(user_id, missing_skills, courses_df):
 def get_user_courses(user_id): return pd.read_sql_query("SELECT * FROM user_course WHERE user_id=?", conn, params=(user_id,))
 
 def update_course_status(course_id, status, progress):
-    # FIX: Use timezone.utc for compatibility
     now = datetime.now(timezone.utc).isoformat()
     c.execute("UPDATE user_course SET status=?, progress=?, enrolled_at=? WHERE id=?", (status, progress, now, course_id))
     conn.commit()
 
 def store_quiz_result(user_id, skill, score):
-    # FIX: Use timezone.utc for compatibility
     now = datetime.now(timezone.utc).isoformat()
     c.execute("INSERT INTO user_quiz(user_id,skill,score,taken_at) VALUES (?,?,?,?)", (user_id, skill, score, now))
     conn.commit()
@@ -361,7 +333,6 @@ def latest_quiz_score(user_id, skill):
     return int(row[0]) if row else 0
 
 def set_skill_verification(user_id, skill, final_score, status):
-    # FIX: Use timezone.utc for compatibility
     now = datetime.now(timezone.utc).isoformat() if status == "VERIFIED" else None
     row = c.execute("SELECT id FROM skill_ver WHERE user_id=? AND skill=?", (user_id, skill)).fetchone()
     if row:
@@ -370,16 +341,15 @@ def set_skill_verification(user_id, skill, final_score, status):
         c.execute("INSERT INTO skill_ver (user_id,skill,final_score,status,verified_at) VALUES (?,?,?,?,?)", (user_id, skill, final_score, status, now))
     conn.commit()
     if status == "VERIFIED":
-        award_points(user_id, 100, f"Skill Verified: {skill}")
+        awardPoints(user_id, 100, f"Skill Verified: {skill}")
         verified_count = c.execute("SELECT COUNT(*) FROM skill_ver WHERE user_id=? AND status='VERIFIED'", (user_id,)).fetchone()[0]
-        if verified_count == 1: award_badge(user_id, "FIRST_VERIFIED")
+        if verified_count == 1: awardBadge(user_id, "FIRST_VERIFIED")
 
 def latest_skill_ver(user_id, skill):
     row = c.execute("SELECT final_score,status,verified_at FROM skill_ver WHERE user_id=? AND skill=? ORDER BY id DESC LIMIT 1", (user_id, skill)).fetchone()
     return {"final_score": row[0], "status": row[1], "verified_at": row[2]} if row else {"final_score": 0, "status": "NOT_VERIFIED", "verified_at": None}
 
-def award_points(user_id, points, reason):
-    # FIX: Use timezone.utc for compatibility
+def awardPoints(user_id, points, reason):
     now = datetime.now(timezone.utc).isoformat()
     c.execute("INSERT INTO points_log(user_id,points,reason,timestamp) VALUES (?,?,?,?)", (user_id, points, reason, now))
     c.execute("UPDATE users SET points = points + ? WHERE id=?", (points, user_id))
@@ -390,13 +360,12 @@ def award_points(user_id, points, reason):
     c.execute("UPDATE users SET level=? WHERE id=?", (level, user_id))
     conn.commit()
 
-def award_badge(user_id, badge_code):
+def awardBadge(user_id, badge_code):
     row = c.execute("SELECT id FROM badges WHERE code=?", (badge_code,)).fetchone()
     if not row: return
     badge_id = row[0]
     already = c.execute("SELECT id FROM user_badges WHERE user_id=? AND badge_id=?", (user_id, badge_id)).fetchone()
     if already: return
-    # FIX: Use timezone.utc for compatibility
     now = datetime.now(timezone.utc).isoformat()
     c.execute("INSERT INTO user_badges(user_id,badge_id,awarded_at) VALUES (?,?,?)", (user_id, badge_id, now))
     conn.commit()
@@ -411,15 +380,13 @@ def get_user_badges(user_id):
                          WHERE ub.user_id=?""", (user_id,)).fetchall()
     return [{"code": r[0], "title": r[1], "description": r[2], "awarded_at": r[3]} for r in rows]
 
-def compute_final_score(P, Q, R): return int(round(0.5*P + 0.4*Q + 0.1*R))
+def computescore(P, Q, R): return int(round(0.5*P + 0.4*Q + 0.1*R))
 def determine_status(final_score):
     if final_score >= 75: return "VERIFIED"
     if final_score >= 50: return "IN_PROGRESS"
     return "NOT_VERIFIED"
-# ---------- END DB & GAMIFICATION ----------
 
-# --- COVER LETTER PDF UTILITIES ---
-def generate_pdf(text):
+def generatePdf(text):
     cleaned_text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('ascii')
     
     pdf = FPDF()
@@ -428,26 +395,21 @@ def generate_pdf(text):
     pdf.multi_cell(0, 5, cleaned_text) 
     return pdf.output(dest='S').encode('latin-1')
 
-def download_pdf_button(text):
-    pdf_data = generate_pdf(text)
+def downloadPdfbutton(text):
+    pdf_data = generatePdf(text)
     b64 = base64.b64encode(pdf_data).decode()
     href = f'<a href="data:application/pdf;base64,{b64}" download="cover_letter.pdf">📥 Download as PDF</a>'
     st.markdown(href, unsafe_allow_html=True)
-# --- END COVER LETTER UTILITIES ---
 
 
-# ---------- UI STRUCTURE ----------
 st.set_page_config(page_title="SkillMap AI Master App", layout="wide")
 
-# FIX: Load data globally so it's available to all rendering functions
 skills = load_skills()
-courses_df = load_courses()
-quiz_bank = load_quizbank()
-# Initialize active quiz state
-if 'active_quiz' not in st.session_state: st.session_state['active_quiz'] = None
-if 'course_id_to_complete' not in st.session_state: st.session_state['course_id_to_complete'] = None
+courses_df = loadCourses()
+quiz_bank = loadQuizbank()
+if 'activequiz' not in st.session_state: st.session_state['activequiz'] = None
+if 'courseIDcomplete' not in st.session_state: st.session_state['courseIDcomplete'] = None
 
-# Sidebar setup
 with st.sidebar:
     selected_page = st.selectbox("Select Application", ["SkillMap Dashboard", "Cover Letter Generator ✉️"])
     st.markdown("---")
@@ -488,7 +450,6 @@ with st.sidebar:
     st.write("Gemini available:", AI_AVAILABLE)
     if AI_AVAILABLE: st.write("Model:", MODEL_NAME)
 
-# --- MAIN PAGE RENDERING ---
 
 def render_skillmap_dashboard(skills, courses_df, quiz_bank):
     st.title("SkillMap AI — Dashboard (with Gamification & Gemini)")
@@ -498,7 +459,7 @@ def render_skillmap_dashboard(skills, courses_df, quiz_bank):
     resume_text_from_file = ""
     if uploaded:
         with st.spinner("Parsing uploaded file..."):
-            resume_text_from_file = parse_resume(uploaded)
+            resume_text_from_file = parseResume(uploaded)
             if not resume_text_from_file:
                 st.warning("Could not extract text from the uploaded file.")
     resume_area = st.text_area("Or paste resume text here", value=resume_text_from_file or "", height=150)
@@ -509,8 +470,8 @@ def render_skillmap_dashboard(skills, courses_df, quiz_bank):
     col1, col2 = st.columns(2)
     with col1:
         if st.button("Analyze (Extract skills & Recommend)"):
-            user_skills = extract_skills_from_text(resume_area, skills)
-            job_skills  = extract_skills_from_text(job_area, skills)
+            user_skills = extractSkills(resume_area, skills)
+            job_skills  = extractSkills(job_area, skills)
             missing = [s for s in job_skills if s not in user_skills]
             st.session_state['user_skills'] = user_skills
             st.session_state['job_skills']  = job_skills
@@ -519,15 +480,15 @@ def render_skillmap_dashboard(skills, courses_df, quiz_bank):
             st.success("Analysis done. Recommendations stored.")
     with col2:
         if st.button("Upload as 'after-learning' resume (evidence)"):
-            user_skills_after = extract_skills_from_text(resume_area, skills)
+            user_skills_after = extractSkills(resume_area, skills)
             st.session_state['user_skills_after'] = user_skills_after
             st.success("After-learning resume stored (used as R evidence).")
         
         if AI_AVAILABLE and st.button("AI: Score Resume vs Job (ATS)"):
             with st.spinner("Running ATS match (Gemini)..."):
-                ats = ats_match_and_suggestions(client, resume_area, job_area) 
+                ats = atsMatch(client, resume_area, job_area) 
                 if ats:
-                    st.subheader("📊 ATS Score")
+                    st.subheader("ATS Score")
                     st.write("Score:", ats.get("score"))
                     st.write("Explanation:", ats.get("explanation"))
                     st.write("Suggestions:")
@@ -569,7 +530,7 @@ def render_skillmap_dashboard(skills, courses_df, quiz_bank):
                 if current_status == 'pending':
                     if cols[0].button("Start Course", key=f"start_{row['id']}"):
                         update_course_status(row['id'], 'in_progress', 0) 
-                        award_points(USER_ID, 10, f"Started course {row['title']}")
+                        awardPoints(USER_ID, 10, f"Started course {row['title']}")
                         st.rerun()
                 else: cols[0].write(f"Progress: {row['progress']}%")
 
@@ -577,12 +538,12 @@ def render_skillmap_dashboard(skills, courses_df, quiz_bank):
 
                 if current_status != 'completed':
                     if cols[2].button("Complete (Take Quiz)", key=f"quiz_trigger_{row['id']}"):
-                        st.session_state['active_quiz'] = row['skill']
-                        st.session_state['course_id_to_complete'] = row['id']
+                        st.session_state['activequiz'] = row['skill']
+                        st.session_state['courseIDcomplete'] = row['id']
                         st.rerun()
                     
                     if cols[3].button("Sync", key=f"sync_{row['id']}"):
-                        award_points(USER_ID, 10, f"Simulated course progress sync for {row['title']}") 
+                        awardPoints(USER_ID, 10, f"Simulated course progress sync for {row['title']}") 
                         newp = min(100, int(row['progress'] or 0) + 25)
                         status = "in_progress" if newp < 100 else "completed"
                         update_course_status(row['id'], status, newp)
@@ -594,7 +555,7 @@ def render_skillmap_dashboard(skills, courses_df, quiz_bank):
                 if AI_AVAILABLE and cols[4].button("AI Plan", key=f"aiplan_{row['id']}"):
                     with st.spinner("Generating AI learning plan..."):
                         profile_text = resume_area or "Learner with basic skills"
-                        plan = generate_learning_path(client, profile_text, row['skill'], target_role=None, weeks=4)
+                        plan = generateLearningP(client, profile_text, row['skill'], target_role=None, weeks=4)
                         if plan:
                             plan_path = os.path.join(AI_PLAN_DIR, f"plan_{USER_ID}_{row['skill'].replace(' ','_')}.json")
                             with open(plan_path, "w", encoding="utf-8") as f: json.dump(plan, f, indent=2)
@@ -609,24 +570,22 @@ def render_skillmap_dashboard(skills, courses_df, quiz_bank):
     st.markdown("---")
     st.header("Quizzes & Verification")
     
-    # Reload logic is now in the main script block (see bottom)
     
     for skill in missing:
         st.subheader(skill.title())
         last_score = latest_quiz_score(USER_ID, skill)
         st.write("Last quiz score:", last_score)
         
-        # Check if quiz exists in the small bank or needs AI generation
         if skill in quiz_bank:
             if st.button(f"Start Quiz: {skill}", key=f"quiz_{skill}"):
-                st.session_state['active_quiz'] = skill
+                st.session_state['activequiz'] = skill
         else:
             if AI_AVAILABLE:
                 if st.button(f"AI Generate Quiz for: {skill}", key=f"genquiz_{skill}"):
                     with st.spinner("Generating quiz via Gemini..."):
-                        q = generate_quiz_for_skill(client, skill, num_questions=3) # 10 questions
+                        q = generateQuiz(client, skill, num_questions=3) 
                         if q:
-                            st.session_state['quiz_bank_reloaded'] = True
+                            st.session_state['quizBank'] = True
                             st.success("AI quiz generated and stored. Rerunning to load questions.")
                             st.rerun()
                         else:
@@ -634,8 +593,8 @@ def render_skillmap_dashboard(skills, courses_df, quiz_bank):
             else:
                 st.info("No quiz available for this skill. AI is disabled.")
 
-    if st.session_state.get('active_quiz'):
-        qskill = st.session_state['active_quiz']
+    if st.session_state.get('activequiz'):
+        qskill = st.session_state['activequiz']
         st.subheader(f"Quiz: {qskill}")
         questions = quiz_bank.get(qskill, [])
         if not questions:
@@ -659,21 +618,21 @@ def render_skillmap_dashboard(skills, courses_df, quiz_bank):
                     store_quiz_result(USER_ID, qskill, score_pct)
                     
                     if score_pct >= 60:
-                        award_points(USER_ID, 30, f"Quiz passed {qskill} ({score_pct}%)")
-                        course_id = st.session_state.get('course_id_to_complete')
+                        awardPoints(USER_ID, 30, f"Quiz passed {qskill} ({score_pct}%)")
+                        course_id = st.session_state.get('courseIDcomplete')
                         if course_id:
                             update_course_status(course_id, "completed", 100) 
-                            award_points(USER_ID, 50, f"Completed course for skill {qskill}")
+                            awardPoints(USER_ID, 50, f"Completed course for skill {qskill}")
                             completed_count = c.execute("""SELECT COUNT(*) FROM user_course WHERE user_id=? AND status='completed'""", (USER_ID,)).fetchone()[0]
-                            if completed_count >= 5: award_badge(USER_ID, "COURSE_FINISHER")
-                            del st.session_state['course_id_to_complete'] 
+                            if completed_count >= 5: awardBadge(USER_ID, "COURSE_FINISHER")
+                            del st.session_state['courseIDcomplete'] 
                         passed_quizzes = c.execute("SELECT COUNT(*) FROM user_quiz WHERE user_id=? AND score>=60", (USER_ID,)).fetchone()[0]
-                        if passed_quizzes >= 5: award_badge(USER_ID, "QUIZ_MASTER")
+                        if passed_quizzes >= 5: awardBadge(USER_ID, "QUIZ_MASTER")
                         st.success(f"Quiz submitted. Score: {score_pct}%. Associated course marked completed.")
                     else:
                         st.error(f"Quiz submitted. Score: {score_pct}%. You need 60% to pass.")
 
-                    st.session_state['active_quiz'] = None
+                    st.session_state['activequiz'] = None
                     st.rerun()
 
     st.markdown("### Compute Verification (P=progress, Q=quiz score, R=resume evidence)")
@@ -684,7 +643,7 @@ def render_skillmap_dashboard(skills, courses_df, quiz_bank):
             P = int(rows['progress'].max()) if not rows.empty else 0
             Q = latest_quiz_score(USER_ID, skill)
             R = 100 if st.session_state.get('user_skills_after') and skill in st.session_state['user_skills_after'] else 0
-            final = compute_final_score(P, Q, R)
+            final = computescore(P, Q, R)
             status = determine_status(final)
             set_skill_verification(USER_ID, skill, final, status)
         st.success("Verification computed.")
@@ -700,7 +659,6 @@ def render_skillmap_dashboard(skills, courses_df, quiz_bank):
 
 
 def render_cover_letter_generator():
-    # Custom CSS styling
     st.markdown("""
         <style>
             .title { text-align: center; font-size: 38px; font-weight: 700; color: #4B8BBE; margin-bottom: 10px;}
@@ -709,11 +667,9 @@ def render_cover_letter_generator():
         </style>
     """, unsafe_allow_html=True)
 
-    # Title
-    st.markdown("<h1 class='title'>✉️ PitchPerfectAI – AI Cover Letter Generator</h1>", unsafe_allow_html=True)
+    st.markdown("<h1 class='title'> PitchPerfectAI  AI Cover Letter Generator</h1>", unsafe_allow_html=True)
     st.markdown("---")
 
-    # Form for user input
     with st.form("cover_letter_form"):
         job_title = st.text_input("Job Title", placeholder="e.g. Software Engineer")
         company = st.text_input("Company Name", placeholder="e.g. Google")
@@ -724,13 +680,12 @@ def render_cover_letter_generator():
         job_description = st.text_area("Paste the Job Description", placeholder="Copy the full job posting here...")
         submitted = st.form_submit_button("Generate Cover Letter")
 
-    # Submission handling
     if submitted:
         if not AI_AVAILABLE:
             st.error("AI is not available. Please check your GOOGLE_API_KEY setting.")
             return
 
-        with st.spinner("✍️ Crafting your personalized cover letter..."):
+        with st.spinner(" Crafting your personalized cover letter..."):
             prompt = f"""
             Write a compelling cover letter for the following job application:
 
@@ -756,15 +711,13 @@ def render_cover_letter_generator():
                 )
                 cover_letter = response.text
 
-                st.success("✅ Cover letter generated successfully!")
-                st.text_area("📄 Generated Cover Letter", value=cover_letter, height=400)
+                st.success("Cover letter generated successfully!")
+                st.text_area("Generated Cover Letter", value=cover_letter, height=400)
 
-                # PDF Download
-                download_pdf_button(cover_letter)
+                downloadPdfbutton(cover_letter)
 
-                # ATS Match Scoring
                 if job_description:
-                    with st.spinner("🔍 Analyzing ATS match..."):
+                    with st.spinner("Analyzing ATS match..."):
                         ats_prompt = f"""
                         Evaluate the following cover letter against this job description.
                         Provide: 1. An ATS match score out of 100 2. A short explanation for the score 3. Three suggestions to improve the cover letter.
@@ -776,23 +729,18 @@ def render_cover_letter_generator():
                             model=MODEL_NAME
                         )
                         st.markdown("---")
-                        st.subheader("📊 ATS Match Analysis")
+                        st.subheader("ATS Match Analysis")
                         st.markdown(ats_response.text)
             except Exception as e:
                  st.error(f"Cover Letter generation failed. API Error: {e}")
 
-    st.markdown("<div class='footer'>Made with ❤️ </div>", unsafe_allow_html=True)
+    st.markdown("<div class='footer'> </div>", unsafe_allow_html=True)
 
-
-# --- RENDER MAIN PAGE ---
-
-# FIX: Add global quiz_bank reload logic here, outside any function, to correctly update 
-# the global variable before it's passed as an argument.
-if 'quiz_bank_reloaded' in st.session_state and st.session_state['quiz_bank_reloaded']:
-    quiz_bank = load_quizbank()
-    del st.session_state['quiz_bank_reloaded']
+if 'quizBank' in st.session_state and st.session_state['quizBank']:
+    quiz_bank = loadQuizbank()
+    del st.session_state['quizBank']
 
 if selected_page == "SkillMap Dashboard":
     render_skillmap_dashboard(skills, courses_df, quiz_bank)
-elif selected_page == "Cover Letter Generator ✉️":
+elif selected_page == "Cover Letter Generator":
     render_cover_letter_generator()
