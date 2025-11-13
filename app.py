@@ -433,6 +433,19 @@ with st.sidebar:
     if st.button("Reset demo DB"):
         try: conn.close()
         except: pass
+        # --- FIX for PermissionError ---
+        try:
+            if 'conn' in locals() and conn:
+                conn.close()
+        except Exception as e:
+            print("Warning: could not close DB connection:", e)
+        if os.path.exists(DB_PATH):
+            try:
+                os.remove(DB_PATH)
+                print("Database file removed successfully.")
+            except PermissionError:
+                print("⚠️ Could not delete database file — it might still be in use. Please stop other running Streamlit/Python instances.")
+
         if os.path.exists(DB_PATH): os.remove(DB_PATH)
         if os.path.exists(AI_QUIZ_CACHE): os.remove(AI_QUIZ_CACHE)
         if os.path.exists(QUIZ_JSON): os.remove(QUIZ_JSON)
@@ -667,7 +680,7 @@ def render_cover_letter_generator():
         </style>
     """, unsafe_allow_html=True)
 
-    st.markdown("<h1 class='title'> PitchPerfectAI  AI Cover Letter Generator</h1>", unsafe_allow_html=True)
+    st.markdown("<h1 class='title'>Cover Letter Generator</h1>", unsafe_allow_html=True)
     st.markdown("---")
 
     with st.form("cover_letter_form"):
@@ -739,8 +752,7 @@ def render_cover_letter_generator():
 if 'quizBank' in st.session_state and st.session_state['quizBank']:
     quiz_bank = loadQuizbank()
     del st.session_state['quizBank']
-
 if selected_page == "SkillMap Dashboard":
     render_skillmap_dashboard(skills, courses_df, quiz_bank)
-elif selected_page == "Cover Letter Generator":
+elif selected_page == "Cover Letter Generator ✉️":  # <-- include emoji
     render_cover_letter_generator()
